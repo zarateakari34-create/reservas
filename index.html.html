@@ -1,0 +1,249 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Panel de reservas</title><style>
+    *{box-sizing:border-box}body{font:16px system-ui,sans-serif;background:#f5f3ef;color:#24342e;
+    margin:auto;max-width:960px;padding:24px}a{color:#265f4c}section,article{background:white;
+    border-radius:14px;padding:20px;margin:16px 0;border:1px solid #e4e8e0}article{background:#fafbf8}
+    form{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:14px 0}
+    label{display:grid;gap:5px}input,textarea,button{font:inherit;border:1px solid #a6b7ae;
+    border-radius:8px;padding:8px;color:inherit}textarea{width:100%;min-height:90px}
+    button{background:#265f4c;color:white;cursor:pointer}.copiar{margin-top:8px}
+    .grilla{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center}
+    .dia{padding:6px;border-radius:6px}.ocupado{background:#cce4d5}.libre{background:#f2f2ec}
+    button.dia{color:inherit}
+    button.dia[aria-pressed="true"]{background:#265f4c;color:white}
+    button.dia:focus-visible{outline:2px solid #265f4c;outline-offset:2px}
+    #dias{display:contents}.error{background:#ffe3dc;padding:12px;border-radius:8px}
+    </style></head><body><header><p>Panel de reservas · Pesos argentinos</p><h1 id="titulo"></h1>
+    <nav><label>Alojamiento<select id="propiedad">
+<option value="0">Zafarrancho Zárate</option><option value="1">La Porteña</option>
+</select></label></nav></header><p>Las reservas se guardan en este navegador.</p><p id="error" class="error" role="alert" hidden></p>
+    <section><h2>Próximos ingresos y salidas</h2><ul id="proximos"></ul>
+    <h2>Saldos de hoy y vencidos</h2><ul id="alertas"></ul></section>
+    <section><h2 id="mes-titulo">Calendario</h2>
+    <form id="ver-mes" method="get">
+    <label>Mes<input type="month" name="mes" value="2026-11" required></label>
+    <button>Ver mes</button></form><p>Verde = ocupado · Gris = disponible. El día de salida queda disponible.</p>
+    <label for="fecha-a-elegir">Fecha a cambiar</label>
+    <select id="fecha-a-elegir">
+      <option value="ingreso">Ingreso</option><option value="salida">Salida</option>
+      <option value="vence">Vencimiento del saldo</option>
+    </select>
+    <p id="fecha-elegida" aria-live="polite">Tocá un día para cargarlo en la nueva reserva.</p>
+    <div class="grilla"><b>Lu</b><b>Ma</b><b>Mi</b><b>Ju</b><b>Vi</b><b>Sá</b><b>Do</b><span id="dias"></span></div></section>
+    <section id="nueva-reserva"><h2>Nueva reserva</h2><form method="post"><label>Nombre<input required name="nombre" type="text" value="" maxlength="120"></label><label>Teléfono<input required name="telefono" type="tel" value="" maxlength="50"></label><label>Ingreso<input required name="ingreso" type="date" value="" ></label><label>Salida<input required name="salida" type="date" value="" ></label><label>Huéspedes<input required name="personas" type="number" value="1" min="1"></label><label>Total en ARS<input required name="total" type="text" value="" inputmode="decimal"></label><label>Vencimiento del saldo<input required name="vence" type="date" value="" ></label><button>Guardar reserva</button></form></section>
+    <section><h2>Reservas y pagos</h2><div id="fichas"></div></section>
+    <script>
+'use strict';
+const obtener = selector => document.querySelector(selector);
+const propiedad = obtener('#propiedad');
+const mes = obtener('[name=mes]');
+const alta = obtener('#nueva-reserva form');
+const selectorFecha = obtener('#fecha-a-elegir');
+const dias = obtener('#dias');
+const clave = 'panel-reservas-v1';
+const formatoPesos = new Intl.NumberFormat('es-AR', {style: 'currency', currency: 'ARS'});
+const pesos = centavos => formatoPesos.format(centavos / 100);
+const fechaVisible = fecha => fecha.split('-').reverse().join('/');
+const hoy = () => new Intl.DateTimeFormat('sv-SE').format(new Date());
+const leer = () => JSON.parse(localStorage.getItem(clave) ?? '[]');
+const guardar = reservas => localStorage.setItem(clave, JSON.stringify(reservas));
+
+function crear(etiqueta, texto, padre) {
+  const elemento = document.createElement(etiqueta);
+  elemento.textContent = texto;
+  padre.append(elemento);
+  return elemento;
+}
+
+function importe(valor) {
+  if (!/^[0-9]{1,12}(?:[,.][0-9]{1,2})?$/.test(valor)) {
+    throw new Error('Ingresá el importe sin separador de miles, por ejemplo 150000,50.');
+  }
+  const centavos = Math.round(Number(valor.replace(',', '.')) * 100);
+  if (centavos <= 0) throw new Error('El importe debe ser mayor que cero.');
+  return centavos;
+}
+
+function ejecutar(accion) {
+  const error = obtener('#error');
+  error.hidden = true;
+  try {
+    accion();
+  } catch (problema) {
+    error.textContent = problema.message;
+    error.hidden = false;
+    error.scrollIntoView({block: 'nearest'});
+  }
+}
+
+function resaltarFechas() {
+  const fechas = Array.from(alta.querySelectorAll('[type=date]'), campo => campo.value);
+  dias.querySelectorAll('button').forEach(dia => {
+    dia.setAttribute('aria-pressed', fechas.includes(dia.dataset.fecha));
+  });
+}
+
+function calendario(reservas) {
+  dias.replaceChildren();
+  const [anio, numeroMes] = mes.value.split('-').map(Number);
+  const inicio = new Date(0);
+  inicio.setFullYear(anio, numeroMes - 1, 1);
+  inicio.setHours(12, 0, 0, 0);
+  const ultimo = new Date(inicio);
+  ultimo.setMonth(numeroMes, 0);
+  obtener('#mes-titulo').textContent = 'Calendario · ' + inicio.toLocaleDateString('es-AR', {
+    month: 'long', year: 'numeric'
+  });
+  const espacios = (inicio.getDay() + 6) % 7;
+  for (let i = 0; i < espacios; i++) crear('span', '', dias);
+  for (let numero = 1; numero <= ultimo.getDate(); numero++) {
+    const fecha = mes.value + '-' + String(numero).padStart(2, '0');
+    const ocupada = reservas.some(r => r.ingreso <= fecha && fecha < r.salida);
+    const boton = crear('button', numero, dias);
+    boton.type = 'button';
+    boton.className = ocupada ? 'dia ocupado' : 'dia libre';
+    boton.dataset.fecha = fecha;
+    boton.setAttribute('aria-label', fechaVisible(fecha) + (ocupada ? ' · Ocupado' : ' · Disponible'));
+    boton.addEventListener('click', () => {
+      alta.elements.namedItem(selectorFecha.value).value = fecha;
+      obtener('#fecha-elegida').textContent =
+        selectorFecha.selectedOptions[0].textContent + ' · ' + fechaVisible(fecha);
+      resaltarFechas();
+    });
+  }
+  resaltarFechas();
+}
+
+function enlaceReserva(lista, texto, reserva) {
+  const item = crear('li', texto, lista);
+  crear('a', reserva.nombre, item).href = '#r' + reserva.id;
+  return item;
+}
+
+const abonado = reserva => reserva.pagos.reduce((suma, pago) => suma + pago.importe, 0);
+
+function ficha(reserva, alojamiento, alertas, fichas) {
+  const saldo = reserva.total - abonado(reserva);
+  const articulo = crear('article', '', fichas);
+  articulo.id = 'r' + reserva.id;
+  crear('h3', '#' + reserva.id + ' · ' + reserva.nombre, articulo);
+  crear('p', fechaVisible(reserva.ingreso) + ' al ' + fechaVisible(reserva.salida) +
+    ' · ' + reserva.personas + ' huéspedes · ' + reserva.telefono, articulo);
+  crear('p', 'Total ' + pesos(reserva.total) + ' · Abonado ' + pesos(abonado(reserva)) +
+    ' · Saldo ' + pesos(saldo), articulo);
+  crear('p', 'Vencimiento del saldo ' + fechaVisible(reserva.vence), articulo);
+  const detalles = crear('details', '', articulo);
+  crear('summary', 'Historial de pagos', detalles);
+  const historial = crear('ul', '', detalles);
+  reserva.pagos.forEach(pago => crear('li', fechaVisible(pago.fecha) + ' · ' + pesos(pago.importe), historial));
+  if (!historial.children.length) crear('li', 'Todavía no hay pagos registrados.', historial);
+  if (!saldo) return;
+
+  if (reserva.vence <= hoy()) {
+    const estado = reserva.vence === hoy() ? 'Vence hoy' : 'Vencido';
+    const aviso = enlaceReserva(alertas, estado + ' · ', reserva);
+    aviso.append(' · ' + pesos(saldo));
+  }
+
+  const form = crear('form', '', articulo);
+  const monto = crear('input', '', crear('label', 'Importe en ARS', form));
+  monto.inputMode = 'decimal';
+  monto.required = true;
+  const fecha = crear('input', '', crear('label', 'Fecha del pago', form));
+  fecha.type = 'date';
+  fecha.value = hoy();
+  fecha.required = true;
+  crear('button', 'Registrar pago', form);
+  form.addEventListener('submit', evento => {
+    evento.preventDefault();
+    ejecutar(() => {
+      const reservas = leer();
+      const actual = reservas.find(r => r.id === reserva.id);
+      const valor = importe(monto.value.trim());
+      if (!actual || valor > actual.total - abonado(actual)) {
+        throw new Error('El pago supera el saldo pendiente o la reserva no existe.');
+      }
+      actual.pagos.push({fecha: fecha.value, importe: valor});
+      actual.pagos.sort((a, b) => a.fecha.localeCompare(b.fecha));
+      guardar(reservas);
+      mostrar();
+    });
+  });
+
+  const mensaje = crear('textarea', '', crear('label', 'Recordatorio para WhatsApp', articulo));
+  mensaje.readOnly = true;
+  mensaje.value = 'Hola, ' + reserva.nombre + '. Te escribo por tu reserva en ' + alojamiento +
+    '. El saldo pendiente es de ' + pesos(saldo) + ' y vence el ' + fechaVisible(reserva.vence) +
+    '. Cuando hagas la transferencia, ¿me enviás el comprobante? Gracias.';
+  const copiar = crear('button', 'Copiar recordatorio', articulo);
+  copiar.type = 'button';
+  copiar.className = 'copiar';
+  copiar.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(mensaje.value);
+      copiar.textContent = 'Copiado';
+    } catch {
+      mensaje.focus();
+      mensaje.select();
+      copiar.textContent = 'Texto seleccionado. Copialo manualmente';
+    }
+  });
+}
+
+function mostrar() {
+  const alojamiento = propiedad.selectedOptions[0].textContent;
+  obtener('#titulo').textContent = alojamiento;
+  const reservas = leer().filter(r => r.propiedad === propiedad.value)
+    .sort((a, b) => a.ingreso.localeCompare(b.ingreso));
+  calendario(reservas);
+  const proximos = obtener('#proximos');
+  const alertas = obtener('#alertas');
+  const fichas = obtener('#fichas');
+  [proximos, alertas, fichas].forEach(elemento => elemento.replaceChildren());
+  reservas.flatMap(r => [[r.ingreso, 'Ingreso', r], [r.salida, 'Salida', r]])
+    .filter(([fecha]) => fecha >= hoy())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, 8)
+    .forEach(([fecha, evento, reserva]) => enlaceReserva(
+      proximos, fechaVisible(fecha) + ' · ' + evento + ' · ', reserva));
+  reservas.forEach(r => ficha(r, alojamiento, alertas, fichas));
+  if (!proximos.children.length) crear('li', 'Sin movimientos próximos.', proximos);
+  if (!alertas.children.length) crear('li', 'Sin saldos para reclamar.', alertas);
+  if (!fichas.children.length) crear('p', 'Todavía no hay reservas.', fichas);
+}
+
+alta.addEventListener('submit', evento => {
+  evento.preventDefault();
+  ejecutar(() => {
+    const reserva = Object.fromEntries(new FormData(alta));
+    reserva.nombre = reserva.nombre.trim();
+    reserva.telefono = reserva.telefono.trim();
+    if (!reserva.nombre || !reserva.telefono) throw new Error('Completá el nombre y el teléfono.');
+    if (reserva.salida <= reserva.ingreso) throw new Error('La salida debe ser posterior al ingreso.');
+    const reservas = leer();
+    const cruce = reservas.find(r => r.propiedad === propiedad.value &&
+      r.ingreso < reserva.salida && r.salida > reserva.ingreso);
+    if (cruce) throw new Error('Esas fechas se superponen con la reserva #' + cruce.id + '.');
+    reserva.id = reservas.reduce((maximo, r) => Math.max(maximo, r.id), 0) + 1;
+    reserva.propiedad = propiedad.value;
+    reserva.total = importe(reserva.total.trim());
+    reserva.pagos = [];
+    guardar([...reservas, reserva]);
+    alta.reset();
+    obtener('#fecha-elegida').textContent = 'Tocá un día para cargarlo en la nueva reserva.';
+    mostrar();
+  });
+});
+
+alta.addEventListener('change', resaltarFechas);
+propiedad.addEventListener('change', () => ejecutar(mostrar));
+obtener('#ver-mes').addEventListener('submit', evento => {
+  evento.preventDefault();
+  ejecutar(mostrar);
+});
+mes.value = hoy().slice(0, 7);
+ejecutar(mostrar);
+</script>
+</body>
+</html>
